@@ -27,6 +27,8 @@ from transformers import (
     LlamaForCausalLM,
     PreTrainedModel,
 )
+from transformers.modeling_outputs import CausalLMOutputWithPast
+from torch.nn import CrossEntropyLoss
 from transformers.configuration_utils import PretrainedConfig
 
 from janus.models.clip_encoder import CLIPVisionTower
@@ -262,6 +264,91 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
     def prepare_gen_img_embeds(self, image_ids: torch.LongTensor):
         return self.gen_aligner(self.gen_embed(image_ids))
 
+    def forward(self, 
+                input_ids, labels=None, modality="understanding", return_dict=True, **kwargs):
+        if modality == "understanding":
+            return super().forward(input_ids, labels, **kwargs)
+        
+        elif modality == "generation":
+            image_token_num_per_image = 576
+            cfg_weight = 5
+            temperature = 1
+
+            tokens = torch.zeros((2*input_ids.size(0), input_ids.size(1)), dtype=torch.int).cuda()
+            for i in range(2):
+                tokens[i*input_ids.size(0):(i+1)*input_ids.size(0), :] = input_ids
+                if i % 2 != 0:
+                    tokens[i*input_ids.size(0):(i+1)*input_ids.size(0), 1:-1] = 100015 # pad_id
+
+            inputs_embeds = self.language_model.get_input_embeddings()(tokens)
+
+            outputs = self.language_model.model(inputs_embeds=inputs_embeds, use_cache=True, past_key_values=None)
+
+            hidden_states = outputs.last_hidden_state
+            logits = self.gen_head(hidden_states)
+
+            logits_cond = logits[0::2, :]
+            logits_uncond = logits[1::2, :]
+
+            all_logits = logits_uncond + cfg_weight * (logits_cond - logits_uncond)
+
+            loss_fct = CrossEntropyLoss()
+            shift_logits = all_logits[..., :-1, :].contiguous()
+            shift_logits = shift_logits.view(-1, self.config.gen_head_config.params.image_token_size)
+
+            if labels is not None:
+                shift_labels = labels[..., 1:].contiguous()
+                shift_labels = shift_labels.view(-1)
+                shift_labels = shift_labels.to(shift_logits.device)
+                loss = loss_fct(shift_logits, shift_labels)
+            else:
+                loss = None
+            if not return_dict:
+                output = (logits,) + outputs[1:]
+                return ((loss,) + output) if loss is not None else output
+
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
+        
+        elif modality == "generation_direct":
+            outputs = self.language_model.model(input_ids=input_ids, **kwargs)
+            hidden_states = outputs[0] # possibly outputs[0]
+            logits = self.gen_head(hidden_states)
+
+            loss = None
+            
+            logits = logits.float()
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_logits = shift_logits.view(-1, self.config.gen_head_config.params.image_token_size)
+                
+            if labels is not None:  
+                shift_labels = labels[..., 1:].contiguous()
+                # Flatten the tokens
+                loss_fct = CrossEntropyLoss()
+                shift_labels = shift_labels.view(-1)
+                # Enable model parallelism
+                shift_labels = shift_labels.to(shift_logits.device)
+                loss = loss_fct(shift_logits, shift_labels)
+            else:
+                loss = None
+
+            if not return_dict:
+                output = (logits,) + outputs[1:]
+                return ((loss,) + output) if loss is not None else output
+            
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
 
 AutoConfig.register("vision", VisionConfig)
 AutoConfig.register("aligner", AlignerConfig)

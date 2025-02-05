@@ -493,7 +493,9 @@ class VQModel(nn.Module):
 
     def encode(self, x):
         h = self.encoder(x)
+        # print(h.shape)
         h = self.quant_conv(h)
+        # print(h.shape)
         quant, emb_loss, info = self.quantize(h)
         return quant, emb_loss, info
 
