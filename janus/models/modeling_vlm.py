@@ -265,11 +265,11 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         return self.gen_aligner(self.gen_embed(image_ids))
 
     def forward(self, 
-                input_ids, labels=None, modality="understanding", return_dict=True, **kwargs):
-        if modality == "understanding":
+                input_ids, labels=None, task="understanding", return_dict=True, **kwargs):
+        if task == "understanding":
             return super().forward(input_ids, labels, **kwargs)
         
-        elif modality == "generation":
+        elif task == "generation":
             image_token_num_per_image = 576
             cfg_weight = 5
             temperature = 1
@@ -315,7 +315,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
                 attentions=outputs.attentions,
             )
         
-        elif modality == "generation_direct":
+        elif task == "generation_direct":
             outputs = self.language_model.model(input_ids=input_ids, **kwargs)
             hidden_states = outputs[0] # possibly outputs[0]
             logits = self.gen_head(hidden_states)
